@@ -1,0 +1,210 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+```
+
+```{r}
+data <- read_csv("C:\\Users\\Admin\\Desktop\\upwork_jobs\\lol_project\\data\\high_diamond_ranked_10min.csv")
+```
+
+```{r}
+#blueExperienceDiff
+
+required_columns <- c(
+  ## ID and Predictor Variable
+  'blueWins',
+  
+  ## Statistics for Blue Teams
+  'blueWardsPlaced',
+  'blueWardsDestroyed',
+  'blueKills',
+  'blueDeaths',
+  'blueAssists',
+  'blueEliteMonsters',
+  'blueDragons',
+  'blueHeralds',
+  'blueTowersDestroyed',
+  'blueAvgLevel',
+  'blueCSPerMin',
+  'blueGoldPerMin',
+  
+  ## Shared Statisitics
+  'blueGoldDiff',
+  'blueFirstBlood',
+  'blueExperienceDiff',
+  
+  ## Statistics for Red Teams
+  'redWardsPlaced',
+  'redWardsDestroyed',
+  'redKills',
+  'redDeaths',
+  'redAssists',
+  'redEliteMonsters',
+  'redDragons',
+  'redHeralds',
+  'redTowersDestroyed',
+  'redAvgLevel',
+  'redCSPerMin',
+  'redGoldPerMin'
+)
+```
+
+```{r}
+data %>% 
+  dplyr::select(blueExperienceDiff) %>% 
+  mutate(winning = ifelse(blueExperienceDiff > 0, 1, 0)) %>% 
+  count(winning)
+```
+
+
+
+```{r}
+modelling_df <- data %>% 
+  select(all_of(required_columns)) %>% 
+  mutate(winning = ifelse(blueExperienceDiff > 0, 1, 0)) %>% 
+  select(-blueExperienceDiff) %>% 
+  mutate(blueWins = factor(blueWins)) %>% 
+  select(all_of(nnn))
+```
+
+```{r}
+set.seed(42)
+lol_split <- initial_split(modelling_df) 
+
+lol_train <- training(lol_split)
+lol_test <- testing(lol_split)
+
+lol_folds <- vfold_cv(lol_train)
+```
+
+```{r}
+lol_rec <-
+  recipe(blueWins~., data = lol_train) %>% 
+  step_normalize(all_predictors()) %>% 
+  step_corr(all_predictors(), threshold = 0.75) %>% 
+  step_zv(all_predictors())
+```
+
+```{r}
+lr_spec <- logistic_reg()
+
+lol_wf <- workflow() %>% 
+  add_model(lr_spec) %>% 
+  add_recipe(lol_rec)
+```
+
+```{r}
+control <- control_resamples(save_pred = TRUE)
+metric <- metric_set(accuracy, roc_auc, f_meas)
+
+lr_res <-
+  fit_resamples(
+  lol_wf,
+  lol_folds,
+  control = control,
+  metrics = metric
+)
+```
+
+```{r}
+lr_res %>% 
+  collect_metrics()
+```
+```{r}
+lol_last_fit <- lol_wf %>% 
+  last_fit(lol_split, metrics = metric)
+```
+
+
+```{r}
+glmnet_spec <-
+  logistic_reg(penalty = tune(), mixture = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+glmnet_workflow <-
+  workflow() %>%
+  add_recipe(lol_rec) %>%
+  add_model(glmnet_spec)
+
+glmnet_grid <-
+  tidyr::crossing(
+    penalty = 10 ^ seq(-6,-1, length.out = 20),
+    mixture = c(0.05,0.2, 0.4, 0.6, 0.8, 1)
+  )
+
+glmnet_tune <-
+  tune_grid(
+    glmnet_workflow,
+    resamples = lol_folds,
+    grid = glmnet_grid,
+    metrics = metric
+  ) 
+```
+
+```{r}
+glmnet_tune %>% autoplot()
+```
+```{r}
+glmnet_tune %>% select_best()
+```
+
+Finalize model
+```{r}
+glmnet_final_workflow <- glmnet_workflow %>% 
+  finalize_workflow(select_best(glmnet_tune,"f_meas"))
+```
+
+```{r}
+glmnet_last_fit <- last_fit(glmnet_final_workflow,lol_split, metrics = metric)
+```
+Results of model on test data
+```{r}
+glmnet_last_fit %>% 
+  collect_metrics()
+```
+Confusion Matrix for Logistic Regression
+```{r}
+glmnet_last_fit %>% 
+  collect_predictions() %>% 
+  conf_mat(estimate = .pred_class, truth = blueWins) %>% 
+  autoplot()
+```
+
+
+Fit on entire data
+```{r}
+lr_model <- fit(glmnet_final_workflow, modelling_df)
+```
+
+```{r}
+predict(lr_model,modelling_df %>% slice(1))
+```
+
+
+Save model
+```{r}
+lr_model %>%
+  write_rds("lr_model.rds")
+```
+
+Explore Variable Importance
+```{r}
+## We don't need additional variables except from A1-A9
+glmnet_last_fit %>%
+  extract_fit_parsnip() %>%
+  vip::vi() %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL,
+       title = "Variable Importance Plot")
+```
